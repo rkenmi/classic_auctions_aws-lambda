@@ -1,9 +1,9 @@
-import json
-import urllib.parse
 import boto3
 import re
-from elasticsearch import Elasticsearch, RequestsHttpConnection
-from aws_requests_auth.aws_auth import AWSRequestsAuth
+from datetime import datetime
+import os
+from elasticsearch import Elasticsearch, RequestsHttpConnection, helpers
+from requests_aws4auth import AWS4Auth
 
 print('Loading function')
 
@@ -13,19 +13,12 @@ es = boto3.client('es')
 
 BUCKET = os.environ['S3_BUCKET']
 ES_HOST = os.environ['ES_HOST']
+ES_REGION = os.environ['ES_REGION']
 
-def lambda_handler(event, context):
-    session = boto3.session.Session()
-    credentials = session.get_credentials().get_frozen_credentials()
-
-    awsauth = AWSRequestsAuth(
-        aws_access_key=credentials.access_key,
-        aws_secret_access_key=credentials.secret_key,
-        aws_token=credentials.token,
-        aws_host=ES_HOST,
-        aws_region=session.region_name,
-        aws_service='es'
-    )
+def lambda_handler():
+    service = 'es'
+    credentials = boto3.Session().get_credentials()
+    awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, ES_REGION, service, session_token=credentials.token)
 
     # use the requests connection_class and pass in our custom auth class
     es = Elasticsearch(
@@ -38,11 +31,6 @@ def lambda_handler(event, context):
 
     print(es.info())
 
-    #print("Received event: " + json.dumps(event, indent=2))
-
-    # Get the object from the event and show its content type
-    # bucket = event['Records'][0]['s3']['bucket']['name']
-    # key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
     key = 'realm/bigglesworth/horde/Auc-ScanData.lua'
     try:
         response = s3.get_object(Bucket=BUCKET, Key=key)
@@ -51,14 +39,33 @@ def lambda_handler(event, context):
         pattern = re.compile(r'(\{\\"\|[a-zA-Z0-9]+\|Hitem:[0-9]+[:0-9\:\'\|a-zA-Z\[\]\s\\\",]+})')
 
         m = pattern.findall(body)
+        actions = []
         for match in m:
             unescaped_s = match.replace('\\', '')
-            pattern2 = re.compile(r'{"\|cff([a-zA-Z0-9]+)\|Hitem:([0-9]+)[:0-9]+\|h\[([a-zA-Z\:\'\"\s]+)\]\|h\|r",([0-9]+|nil),[0-9]+,[0-9]+,(?:[0-9]+|nil),([0-9]+),([1234]),[0-9]+,"[a-zA-Z\:\'\"\s]+",(?:[0-9]+|nil),[0-9]+,[0-9]+,(?:false|true),([0-9]+),[0-9]+,[0-9]+,([0-9]+),[0-9]+,(?:true|false),"([a-zA-Z]*)",[0-9]+,"([a-zA-Z]*)",[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,}')
+            pattern2 = re.compile(r'{"\|cff([a-zA-Z0-9]+)\|Hitem:([0-9]+)[:0-9]+\|h\[([a-zA-Z\:\'\"\s0-9]+)\]\|h\|r",([0-9]+|nil),[0-9]+,[0-9]+,(?:[0-9]+|nil),([0-9]+),([1234]),[0-9]+,"[a-zA-Z\:\'\"\s0-9]+",(?:[0-9]+|nil),[0-9]+,[0-9]+,(?:false|true),([0-9]+),[0-9]+,[0-9]+,([0-9]+),[0-9]+,(?:true|false),"([a-zA-Z]*)",[0-9]+,"([a-zA-Z]*)",[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,}')
             g = pattern2.match(unescaped_s)
-            for item in g.groups():
+            if (g is None):
+                print(unescaped_s)
+            actions.append(
+                {
+                    "_index": "ah_item",
+                    "_type": "_doc",
+                    "_source": {
+                        "rarity": g.group(1),
+                        "id": g.group(2),
+                        "itemName": g.group(3),
+                        "itemLvl": g.group(4),
+                        "bid": g.group(5),
+                        "timeRemaining": g.group(6),
+                        "minLvlRequired": g.group(7),
+                        "buyout": g.group(8),
+                        "seller": g.group(9),
+                        "timestamp": datetime.now()
+                    },
+                }
+            )
 
-                print(g.groups())
-        # print(m)
+        helpers.bulk(es, actions)
         return response['ContentType']
     except Exception as e:
         print(e)
