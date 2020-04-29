@@ -1,8 +1,11 @@
+import json
+import urllib.parse
 import boto3
 import re
 from datetime import datetime
 import os
 from elasticsearch import Elasticsearch, RequestsHttpConnection, helpers
+from aws_requests_auth.aws_auth import AWSRequestsAuth
 from requests_aws4auth import AWS4Auth
 
 print('Loading function')
@@ -15,7 +18,10 @@ BUCKET = os.environ['S3_BUCKET']
 ES_HOST = os.environ['ES_HOST']
 ES_REGION = os.environ['ES_REGION']
 
-def lambda_handler():
+def lambda_handler(event, context):
+    session = boto3.session.Session()
+    credentials = session.get_credentials().get_frozen_credentials()
+
     service = 'es'
     credentials = boto3.Session().get_credentials()
     awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, ES_REGION, service, session_token=credentials.token)
@@ -29,8 +35,6 @@ def lambda_handler():
         connection_class=RequestsHttpConnection
     )
 
-    print(es.info())
-
     key = 'realm/bigglesworth/horde/Auc-ScanData.lua'
     try:
         response = s3.get_object(Bucket=BUCKET, Key=key)
@@ -42,10 +46,8 @@ def lambda_handler():
         actions = []
         for match in m:
             unescaped_s = match.replace('\\', '')
-            pattern2 = re.compile(r'{"\|cff([a-zA-Z0-9]+)\|Hitem:([0-9]+)[:0-9]+\|h\[([a-zA-Z\:\'\"\s0-9]+)\]\|h\|r",([0-9]+|nil),[0-9]+,[0-9]+,(?:[0-9]+|nil),([0-9]+),([1234]),[0-9]+,"[a-zA-Z\:\'\"\s0-9]+",(?:[0-9]+|nil),[0-9]+,[0-9]+,(?:false|true),([0-9]+),[0-9]+,[0-9]+,([0-9]+),[0-9]+,(?:true|false),"([a-zA-Z]*)",[0-9]+,"([a-zA-Z]*)",[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,}')
+            pattern2 = re.compile(r'{"\|cff([a-zA-Z0-9]+)\|Hitem:([0-9]+)[:0-9]+\|h\[([a-zA-Z\:\'\"\s0-9]+)\]\|h\|r",([0-9]+|nil),[0-9]+,[0-9]+,(?:[0-9]+|nil),([0-9]+),([1234]),[0-9]+,"[a-zA-Z\:\'\"\s0-9]+",(?:[0-9]+|nil),([0-9]+),[0-9]+,(?:false|true),([0-9]+),[0-9]+,[0-9]+,([0-9]+),[0-9]+,(?:true|false),"([a-zA-Z]*)",[0-9]+,"([a-zA-Z]*)",[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,}')
             g = pattern2.match(unescaped_s)
-            if (g is None):
-                print(unescaped_s)
             actions.append(
                 {
                     "_index": "ah_item",
@@ -57,14 +59,16 @@ def lambda_handler():
                         "itemLvl": g.group(4),
                         "bid": g.group(5),
                         "timeRemaining": g.group(6),
-                        "minLvlRequired": g.group(7),
-                        "buyout": g.group(8),
-                        "seller": g.group(9),
+                        "quantity": g.group(7),
+                        "minLvlRequired": g.group(8),
+                        "buyout": g.group(9),
+                        "seller": g.group(10),
                         "timestamp": datetime.now()
                     },
                 }
             )
 
+        es.indices.delete(index='ah_item', ignore=[400, 404])
         helpers.bulk(es, actions)
         return response['ContentType']
     except Exception as e:
