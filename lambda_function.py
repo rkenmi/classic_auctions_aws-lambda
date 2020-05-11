@@ -11,12 +11,26 @@ from requests_aws4auth import AWS4Auth
 print('Loading function')
 
 s3 = boto3.client('s3')
-es = boto3.client('es')
-
 
 BUCKET = os.environ['S3_BUCKET']
 ES_HOST = os.environ['ES_HOST']
 ES_REGION = os.environ['ES_REGION']
+
+def tokenizeItemName(itemName):
+    tokens = itemName.split(" ")
+    results = []
+
+    for windowSize in range(2, len(tokens)):
+        for i in range(0, len(tokens)):
+            e_i = i + windowSize
+            if e_i > len(tokens):
+                break
+
+            sublist = tokens[i:e_i]
+            results.append(" ".join(sublist))
+    tokens.append(itemName)
+    tokens.extend(results)
+    return tokens
 
 def lambda_handler(event, context):
     session = boto3.session.Session()
@@ -28,6 +42,7 @@ def lambda_handler(event, context):
 
     # use the requests connection_class and pass in our custom auth class
     es = Elasticsearch(
+        timeout=30,
         hosts=[{'host': ES_HOST, 'port': 443}],
         http_auth=awsauth,
         use_ssl=True,
@@ -55,8 +70,31 @@ def lambda_handler(event, context):
             pattern = re.compile(r'(\{\\"\|[a-zA-Z0-9]+\|Hitem:[0-9]+(?:[:0-9\:\'\|a-zA-Z\[\]\s\\\",]|[^\x00-\x7F])+})')
 
             m = pattern.findall(realm_sect[server_key_end_char_index:])
-            es_index = "ah_item_{0}_{1}".format(server_name, faction)
-            print(es_index)
+            es_alias = "ah_item_{0}_{1}".format(server_name, faction)
+
+            # Check if alias is set up for this realm and faction.
+
+            last_indices = []
+            if es.indices.exists(es_alias):
+                last_indices = list(es.indices.get_alias(name=es_alias).keys())
+                print("Last indices: " + " ".join(last_indices))
+
+            es_temp_index = "ah_item_{0}_{1}_{2}".format(server_name, faction, int(datetime.now().timestamp()))
+
+            es.indices.create(es_temp_index,
+                              body={
+                                  "mappings": {
+                                      "_doc": {
+                                          "properties": {
+                                              "suggest": {
+                                                  "type": "completion"
+                                              }
+                                          }
+                                      },
+                                  }
+                              }
+                              )
+
             for match in m:
                 unescaped_s = match.replace('\\', '')
                 pattern2 = re.compile(
@@ -64,7 +102,7 @@ def lambda_handler(event, context):
                 g = pattern2.match(unescaped_s)
                 actions.append(
                     {
-                        "_index": es_index,
+                        "_index": es_temp_index,
                         "_type": "_doc",
                         "_source": {
                             "rarity": g.group(1),
@@ -77,14 +115,25 @@ def lambda_handler(event, context):
                             "minLvlRequired": g.group(8),
                             "buyout": g.group(9),
                             "seller": g.group(10),
-                            "timestamp": datetime.now()
+                            "timestamp": datetime.now(),
+                            "suggest": tokenizeItemName(g.group(3))
                         },
                     }
                 )
-            print(server_name, len(actions))
-            # if es.indices.exists(index=es_index):
-            #     es.indices.delete(index=es_index, ignore=[400, 404])
-    es.indices.delete(index='ah_item*', ignore=[400, 404])
-    helpers.bulk(es, actions)
+
+            print("Number of documents from " + server_name + ": ", len(actions))
+
+            # Bulk insert to temporary index
+            helpers.bulk(es, actions)
+
+            # Point temporary index to alias
+            es.indices.put_alias(name=es_alias, index=es_temp_index)
+
+            # Clean up old indices pointing to alias
+            if len(last_indices) > 0:
+                es.indices.delete_alias(name=es_alias, index=last_indices)
+                es.indices.delete(index=last_indices, ignore=[400, 404])
+
+            actions.clear()
 
     return response['ContentType']
